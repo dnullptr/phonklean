@@ -207,7 +207,7 @@ class PhonkCleaner:
             traceback.print_exc()
 
 if __name__ == "__main__":
-    INPUT_FILE = "has2bu.mp3"
+    INPUT_FILE = "Montagem_Coma.mp3"
     
     cleaner = PhonkCleaner(INPUT_FILE)
     cleaner.separate_stems()
