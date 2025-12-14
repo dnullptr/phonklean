@@ -4,20 +4,20 @@ import shutil
 import numpy as np
 import librosa
 import scipy.io.wavfile as wavfile
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, sosfilt, correlate
 from pydub import AudioSegment
 from pathlib import Path
 import demucs.separate
 import torch
 
-# Try importing VoiceFixer
+# נסיון לייבא את VoiceFixer
 try:
     from voicefixer import VoiceFixer
     HAS_VOICEFIXER = True
-    print("[*] VoiceFixer detected! Vocals will be AI restored.")
+    print("[*] VoiceFixer detected! High-Fidelity Parallel Processing Enabled.")
 except ImportError:
     HAS_VOICEFIXER = False
-    print("[*] VoiceFixer not found. Vocals will be used raw.")
+    print("[*] VoiceFixer not found. Using standard EQ fallback.")
     print("    (To enable AI restoration: pip install voicefixer)")
 
 class PhonkCleaner:
@@ -37,6 +37,11 @@ class PhonkCleaner:
     def separate_stems(self):
         print(f"[*] Starting Demucs separation for: {self.input_path.name}")
         
+        # אם כבר קיימת הפרדה, דלג כדי לחסוך זמן
+        if self.demucs_out_dir.exists() and (self.demucs_out_dir / "vocals.mp3").exists():
+            print("    -> Stems already exist, skipping separation.")
+            return self.demucs_out_dir
+
         cmd = [
             "-n", "htdemucs_ft",
             str(self.input_path),
@@ -57,18 +62,21 @@ class PhonkCleaner:
         return self.demucs_out_dir
 
     def save_wav_safe(self, path, data, sr):
+        # נרמול למניעת דיסטורשן דיגיטלי
         max_val = np.max(np.abs(data))
         if max_val > 0:
-            data = data / max_val * 0.90
+            data = data / max_val * 0.95
 
+        # טיפול במימדים (מונו/סטריאו)
         if isinstance(data, np.ndarray):
             if data.ndim == 2:
-                if data.shape[0] == 1 and data.shape[1] > 1:
+                if data.shape == 1 and data.shape[1] > 1: # (1, N)
                     data = data.flatten()
-                elif data.shape[1] == 1:
+                elif data.shape[1] == 1: # (N, 1)
                     data = data[:, 0]
-                elif data.shape[0] == 2 and data.shape[1] > 2:
+                elif data.shape == 2 and data.shape[1] > 2: # (2, N) -> Transpose
                     data = data.T
+            # הפיכה לסטריאו אם זה מונו
             if data.ndim == 1:
                 data = np.column_stack((data, data))
         else:
@@ -84,6 +92,40 @@ class PhonkCleaner:
         except Exception as e:
             print(f"[!] Failed to save {path.name}: {e}")
 
+    # --- יישור פאזה (הסוד לעיבוד מקבילי) ---
+    def align_signals(self, ref_sig, target_sig):
+        """
+        מסנכרן את הפאזה בין האות המקורי לאות המעובד (AI) כדי למנוע ביטול תדרים.
+        """
+        # לוקחים חתיכה קצרה לחישוב כדי לא להעמיס על המעבד
+        # מספיק 30 שניות כדי להבין את הדיליי
+        n = min(len(ref_sig), len(target_sig), 44100 * 30)
+        
+        # חישוב קורלציה
+        correlation = correlate(ref_sig[:n], target_sig[:n], mode='full', method='fft')
+        lag = correlation.argmax() - (n - 1)
+        
+        # אם מצאנו דיליי משמעותי, נתקן אותו
+        if abs(lag) > 0:
+            print(f"    -> Aligning phase: shifting by {lag} samples")
+            if lag > 0:
+                # Target מקדים, צריך להזיז ימינה
+                aligned = np.pad(target_sig, (0, lag), mode='constant')[lag:]
+            else:
+                # Target מאחר, צריך לחתוך התחלה
+                lag = abs(lag)
+                aligned = np.pad(target_sig, (lag, 0), mode='constant')[:len(target_sig)]
+        else:
+            aligned = target_sig
+
+        # וידוא אורך זהה למקור
+        if len(aligned) > len(ref_sig):
+            aligned = aligned[:len(ref_sig)]
+        elif len(aligned) < len(ref_sig):
+            aligned = np.pad(aligned, (0, len(ref_sig) - len(aligned)), mode='constant')
+            
+        return aligned
+
     def process_drums(self):
         print("[*] Enhancing Drums...")
         drums_file = self.demucs_out_dir / "drums.mp3"
@@ -91,13 +133,14 @@ class PhonkCleaner:
         if not drums_file.exists(): return None
 
         y, sr = librosa.load(str(drums_file), sr=None, mono=True)
-        y = np.tanh(y * 0.9)  # soft-clip
+        # Soft Clipper
+        y = np.tanh(y * 0.9)
+        # EQ
         sos_hp = butter(2, 40, 'hp', fs=sr, output='sos')
         y = sosfilt(sos_hp, y)
         sos_lp = butter(2, 15000, 'lp', fs=sr, output='sos')
         y = sosfilt(sos_lp, y)
-        y = y / np.max(np.abs(y)) * 0.92
-
+        
         output_path = self.demucs_out_dir / "drums_clean_synth.wav"
         self.save_wav_safe(output_path, y, sr)
         return output_path
@@ -109,76 +152,100 @@ class PhonkCleaner:
         if not bass_file.exists(): return None
 
         y, sr = librosa.load(str(bass_file), sr=None, mono=True)
+        # Saturation & EQ
         y = np.tanh(y * 0.85)
         sos_hp = butter(2, 20, 'hp', fs=sr, output='sos')
         y = sosfilt(sos_hp, y)
         sos_lp = butter(2, 300, 'lp', fs=sr, output='sos')
         bass_low = sosfilt(sos_lp, y) * 1.2
+        # מיקס של באס נמוך מודגש עם המקור
         y = y * 0.8 + bass_low * 0.2
-        y = y / np.max(np.abs(y)) * 0.92
-
+        
         output_path = self.demucs_out_dir / "bass_clean_synth.wav"
         self.save_wav_safe(output_path, y, sr)
         return output_path
 
     def process_vocals(self):
-        print("[*] Restoring Vocals...")
+        print("[*] Restoring Vocals (Parallel Strategy)...")
         vocals_path = self.demucs_out_dir / "vocals.mp3"
-        if not vocals_path.exists():
-            vocals_path = vocals_path.with_suffix(".wav")
+        if not vocals_path.exists(): vocals_path = vocals_path.with_suffix(".wav")
         if not vocals_path.exists():
             print("[!] No vocals stem found.")
             return None
 
         out_path = self.demucs_out_dir / "vocals_restored.wav"
+        
+        # טעינת המקור (חשוב לטעון ב-44100 לסטנדרטיזציה)
+        y_original, sr = librosa.load(str(vocals_path), sr=44100, mono=True)
 
         if HAS_VOICEFIXER:
             try:
+                print("    -> Generating Clean Body with VoiceFixer...")
                 vf = VoiceFixer()
-                vf.restore(
-                    input=str(vocals_path),
-                    output=str(out_path),
-                    cuda=torch.cuda.is_available(),
-                    mode=0
-                )
-                print("    -> VoiceFixer AI restoration complete.")
-                return out_path
+                # קובץ זמני לפלט של המודל
+                temp_vf = self.demucs_out_dir / "temp_vf.wav"
+                
+                # Mode 0 נותן את הניקוי החזק ביותר (אבל מאבד פרטים)
+                vf.restore(input=str(vocals_path), output=str(temp_vf), cuda=torch.cuda.is_available(), mode=0)
+                
+                # טעינת התוצאה הנקייה
+                y_clean, _ = librosa.load(str(temp_vf), sr=sr, mono=True)
+                
+                # מחיקת קובץ זמני
+                if temp_vf.exists(): os.remove(temp_vf)
+
+                # --- שלב 1: סנכרון ---
+                y_clean = self.align_signals(y_original, y_clean)
+
+                # --- שלב 2: חילוץ ה"אוויר" מהמקור ---
+                print("    -> Extracting High-End Detail from original...")
+                # פילטר High-Pass אגרסיבי ב-9kHz
+                # הדיסטורשן של הפונק לרוב נמצא ב-Mids, הגבוהים יחסית נקיים
+                sos_high = butter(6, 9000, 'hp', fs=sr, output='sos')
+                y_air = sosfilt(sos_high, y_original)
+
+                # --- שלב 3: המיקס המקבילי ---
+                # 80% גוף נקי + 60% אוויר מקורי (קצת חפיפה לפצות על חיתוכים)
+                y_final = (y_clean * 0.8) + (y_air * 0.6)
+                
             except Exception as e:
-                print(f"[!] VoiceFixer failed: {e}. Using raw vocals instead.")
-                return vocals_path
+                print(f"[!] VoiceFixer error: {e}. Fallback to EQ.")
+                y_final = y_original
         else:
-            return vocals_path
+            # Fallback ללא AI
+            y_final = y_original
+
+        self.save_wav_safe(out_path, y_final, sr)
+        return out_path
 
     def mix_final_track(self, clean_drums_path, clean_bass_path, vocals_path=None):
         print("[*] Mixing final track...")
         try:
             other_path = self.demucs_out_dir / "other.mp3"
-            if not other_path.exists():
-                other_path = other_path.with_suffix('.wav')
+            if not other_path.exists(): other_path = other_path.with_suffix('.wav')
 
             vocals = AudioSegment.from_file(str(vocals_path)) if vocals_path else AudioSegment.silent(duration=1000)
             other = AudioSegment.from_file(str(other_path))
+            
+            # וידוא אחידות Sample Rate
             target_fr = vocals.frame_rate
 
             if clean_drums_path and clean_drums_path.exists():
                 new_drums = AudioSegment.from_wav(str(clean_drums_path))
-                if new_drums.frame_rate != target_fr:
-                    new_drums = new_drums.set_frame_rate(target_fr)
+                if new_drums.frame_rate!= target_fr: new_drums = new_drums.set_frame_rate(target_fr)
             else:
                 new_drums = AudioSegment.silent(duration=len(vocals), frame_rate=target_fr)
 
             if clean_bass_path and clean_bass_path.exists():
                 new_bass = AudioSegment.from_wav(str(clean_bass_path))
-                if new_bass.frame_rate != target_fr:
-                    new_bass = new_bass.set_frame_rate(target_fr)
+                if new_bass.frame_rate!= target_fr: new_bass = new_bass.set_frame_rate(target_fr)
             else:
                 new_bass = AudioSegment.silent(duration=len(vocals), frame_rate=target_fr)
 
+            # פונקציית עזר להמרת ערוצים
             def _normalize_channels(seg, target=2):
-                if seg.channels == target:
-                    return seg
-                if seg.channels != 1 and target != 1:
-                    seg = seg.set_channels(1)
+                if seg.channels == target: return seg
+                if seg.channels!= 1 and target!= 1: seg = seg.set_channels(1)
                 return seg.set_channels(target)
 
             target_channels = 2
@@ -187,14 +254,15 @@ class PhonkCleaner:
             new_drums = _normalize_channels(new_drums, target_channels)
             new_bass = _normalize_channels(new_bass, target_channels)
 
-            drums_gain_db = -2
-            bass_gain_db = 2
+            # כיוון עוצמות סופי
+            drums_gain_db = -1.5
+            bass_gain_db = 1.0
 
             final_mix = (
                 vocals
-                .overlay(other)
-                .overlay(new_drums + drums_gain_db)
-                .overlay(new_bass + bass_gain_db)
+               .overlay(other)
+               .overlay(new_drums + drums_gain_db)
+               .overlay(new_bass + bass_gain_db)
             )
 
             out_file = self.output_dir / f"{self.track_name}_CLEANED_PHONK.mp3"
@@ -207,6 +275,7 @@ class PhonkCleaner:
             traceback.print_exc()
 
 if __name__ == "__main__":
+    # הקפד לשנות את שם הקובץ לקובץ שלך
     INPUT_FILE = "Montagem_Coma.mp3"
     
     cleaner = PhonkCleaner(INPUT_FILE)
