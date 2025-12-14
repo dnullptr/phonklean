@@ -1,6 +1,7 @@
 # Phonklean
 
 Phonklean — a small, practical tool for restoring phonk tracks that have been overly saturated, clipped, or damaged by heavy "90s" effects.
+<p align="center"><img width="256" height="256" alt="None" src="https://github.com/user-attachments/assets/d3d6aae2-b134-49d6-8b91-a06966023dca" /></p>  
 
 Based on my `censorMyPy` project (which focused on censoring explicit lyrics), this project shifts focus to audio repair: recovering musical detail lost to distortion and clipping common in phonk and similar 2025-era genres.
 
