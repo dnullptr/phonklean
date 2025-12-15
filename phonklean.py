@@ -1,3 +1,4 @@
+import argparse
 import sys
 import os
 import shutil
@@ -206,13 +207,13 @@ class PhonkCleaner:
 
         if HAS_VOICEFIXER and NO_VOCALS is False:
             try:
-                print("    -> Generating Clean Body with VoiceFixer...")
+                print(f"    -> Generating Clean Body with VoiceFixer...{' (Mode '+str(VF_MODE)+')'}")
                 vf = VoiceFixer()
                 # קובץ זמני לפלט של המודל
                 temp_vf = self.demucs_out_dir / "temp_vf.wav"
                 
                 # Mode 0 נותן את הניקוי החזק ביותר (אבל מאבד פרטים)
-                vf.restore(input=str(vocals_path), output=str(temp_vf), cuda=torch.cuda.is_available(), mode=0)
+                vf.restore(input=str(vocals_path), output=str(temp_vf), cuda=torch.cuda.is_available(), mode=VF_MODE)
                 
                 # טעינת התוצאה הנקייה
                 y_clean, _ = librosa.load(str(temp_vf), sr=sr, mono=True)
@@ -302,12 +303,39 @@ class PhonkCleaner:
             traceback.print_exc()
 
 if __name__ == "__main__":
-    # הקפד לשנות את שם הקובץ לקובץ שלך
-    INPUT_FILE = "Song_name.mp3"
-    from sys import argv
-    if len(argv) > 1:
-        INPUT_FILE = argv[1]
-        NO_VOCALS = argv[2].lower() in ["no_vocals",'-no_vocals'] if len(argv) > 2 else False
+    parser = argparse.ArgumentParser(description="Phonklean - Audio Restoration Tool",
+                                     epilog="Made with hate for 90s over-saturated instruments by dnullptr.")
+    
+    # 1. Input File
+    parser.add_argument(
+        "input_file", 
+        nargs="?", 
+        default="Song_name.mp3",
+        help="Path to the input audio file"
+    )
+    
+    # 2. No Vocals flag (sets arg to True if present)
+    parser.add_argument(
+        "--no-vocals", "-nv",
+        action="store_true",
+        help="Skip vocal processing"
+    )
+
+    # 3. VoiceFixer mode selection (if available)
+    parser.add_argument(
+        "--vf-mode", "-vfm",
+        type=int,
+        choices=[0, 1, 2],
+        default=0,
+        help="VoiceFixer mode: 0 (Default), 1 (Adds pre-processing and high-freq. cut), 2 (train mode)"
+    )
+
+    args = parser.parse_args()
+
+    INPUT_FILE = args.input_file
+    NO_VOCALS = args.no_vocals
+    VF_MODE = int(args.vf_mode)  # VoiceFixer mode (0 = strongest cleaning)
+
     cleaner = PhonkCleaner(INPUT_FILE)
     cleaner.separate_stems()
     
