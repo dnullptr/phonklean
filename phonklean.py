@@ -126,6 +126,32 @@ class PhonkCleaner:
             
         return aligned
 
+   # we want to find all the time stamps (tuples of (start, end) for parts) where drums or bass play, so we only process vocals on those parts
+    def find_drum_bass_timestamps(self, threshold=0.02, min_silence_len=0.3, sr=44100) -> list[tuple[float, float]]:
+        drums_file = self.demucs_out_dir / "drums.mp3"
+        if not drums_file.exists(): drums_file = self.demucs_out_dir / "drums.wav"
+        bass_file = self.demucs_out_dir / "bass.mp3"
+        if not bass_file.exists(): bass_file = self.demucs_out_dir / "bass.wav" 
+        if not drums_file.exists() and not bass_file.exists():
+            return []
+        y_drums, _ = librosa.load(str(drums_file), sr=sr, mono=True) if drums_file.exists() else np.zeros(1)
+        y_bass, _ = librosa.load(str(bass_file), sr=sr, mono=True) if bass_file.exists() else np.zeros(1)
+        y_combined = y_drums + y_bass
+        energy = librosa.feature.rms(y=y_combined, frame_length=2048, hop_length=512)[0]
+        frames = np.where(energy > threshold)[0]
+        if len(frames) == 0:
+            return []
+        times = librosa.frames_to_time(frames, sr=sr, hop_length=512)
+        timestamps = []
+        start = times[0]
+        for i in range(1, len(times)):
+            if times[i] - times[i-1] > min_silence_len:
+                end = times[i-1]
+                timestamps.append((start, end))
+                start = times[i]
+        timestamps.append((start, times[-1]))
+        return timestamps
+
     def process_drums(self):
         print("[*] Enhancing Drums...")
         drums_file = self.demucs_out_dir / "drums.mp3"
@@ -178,7 +204,7 @@ class PhonkCleaner:
         # טעינת המקור (חשוב לטעון ב-44100 לסטנדרטיזציה)
         y_original, sr = librosa.load(str(vocals_path), sr=44100, mono=True)
 
-        if HAS_VOICEFIXER:
+        if HAS_VOICEFIXER and NO_VOCALS is False:
             try:
                 print("    -> Generating Clean Body with VoiceFixer...")
                 vf = VoiceFixer()
@@ -213,6 +239,7 @@ class PhonkCleaner:
                 y_final = y_original
         else:
             # Fallback ללא AI
+            print("    -> ","VoiceFixer not available or disabled." if not NO_VOCALS else "Vocals processing disabled by user.", "Using EQ fallback.")
             y_final = y_original
 
         self.save_wav_safe(out_path, y_final, sr)
@@ -276,8 +303,11 @@ class PhonkCleaner:
 
 if __name__ == "__main__":
     # הקפד לשנות את שם הקובץ לקובץ שלך
-    INPUT_FILE = "Montagem_Coma.mp3"
-    
+    INPUT_FILE = "Song_name.mp3"
+    from sys import argv
+    if len(argv) > 1:
+        INPUT_FILE = argv[1]
+        NO_VOCALS = argv[2].lower() in ["no_vocals",'-no_vocals'] if len(argv) > 2 else False
     cleaner = PhonkCleaner(INPUT_FILE)
     cleaner.separate_stems()
     
