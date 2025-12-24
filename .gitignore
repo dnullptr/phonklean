@@ -3,3 +3,6 @@
 *.flac
 attenuate_transients.py
 hpss_clean.py
+MANIFEST.md
+__pycache__/phonklean_gui.cpython-310.pyc
+__pycache__/phonklean.cpython-310.pyc

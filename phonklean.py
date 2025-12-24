@@ -224,7 +224,7 @@ class PhonkCleaner:
             print(f"       [!] HPSS failed: {e}, skipping bleed removal.")
             return y
 
-    def process_vocals(self):
+    def process_vocals(self,no_vocals=True):
         print("[*] Restoring Vocals (Parallel Strategy)...")
         vocals_path = self.demucs_out_dir / "vocals.mp3"
         if not vocals_path.exists(): vocals_path = vocals_path.with_suffix(".wav")
@@ -237,7 +237,7 @@ class PhonkCleaner:
         # טעינת המקור (חשוב לטעון ב-44100 לסטנדרטיזציה)
         y_original, sr = librosa.load(str(vocals_path), sr=44100, mono=True)
 
-        if HAS_VOICEFIXER and NO_VOCALS is False:
+        if HAS_VOICEFIXER and all([NO_VOCALS,no_vocals]) is False:
             try:
                 print(f"    -> Generating Clean Body with VoiceFixer...{' (Mode '+str(VF_MODE)+')'}")
                 vf = VoiceFixer()
@@ -587,7 +587,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
+    global NO_VOCALS
     INPUT_FILE = args.input_file
     NO_VOCALS = args.no_vocals
     VF_MODE = int(args.vf_mode)
