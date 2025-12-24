@@ -8,6 +8,7 @@ Based on my `censorMyPy` project (which focused on censoring explicit lyrics), t
 What it does
 - Reconstructs lost detail using the htdemucs transformer inpainting model.
 - Reduces clipping and 90s-style saturation artifacts while preserving character.
+- **Removes drum bleed and gating artifacts** from vocals using harmonic-percussive source separation (HPSS).
 - Works on full mixes or separated stems.
 
 How it works (overview)
@@ -43,6 +44,9 @@ Usage & CLI options
 - `--autotune-key [KEY|auto]` : root key for autotune; use `auto` to detect key from the vocals stem.
 - `--autotune-scale [chromatic|major|minor]` : scale used for snapping pitches. If `chromatic`, detected scale may be used when key=`auto`.
 - `--autotune-strength [0.0-1.0]` : control how strongly notes are corrected (0 = passthrough, 1 = full correction).
+- `--bleed-removal` : enable HPSS-based drum bleed removal from vocals (removes over-gated drum artifacts).
+- `--bleed-margin [0.5-4.0]` : HPSS separation margin in dB (higher = stricter separation; default 2.0).
+- `--bleed-blend [0.0-1.0]` : percussive blend ratio (0.0 = remove all transients, 0.5 = 50%% blend; default 0.3).
 
 Examples
 
@@ -55,6 +59,12 @@ python phonklean.py my_song.mp3 --no-vocals
 
 # Enable smart autotune on detected key with moderate strength
 python phonklean.py my_song.mp3 --autotune-vocals --autotune-key auto --autotune-strength 0.6
+
+# Remove drum bleed from vocals (default blend 30%)
+python phonklean.py my_song.mp3 --bleed-removal
+
+# Aggressive drum bleed removal (10% percussive blend, tight separation)
+python phonklean.py my_song.mp3 --bleed-removal --bleed-blend 0.1 --bleed-margin 3.0
 ```
 
 License
