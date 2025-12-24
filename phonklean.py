@@ -246,6 +246,127 @@ class PhonkCleaner:
         self.save_wav_safe(out_path, y_final, sr)
         return out_path
 
+    def apply_autotune_to_vocals(self, vocals_path, sr=44100, key='C', scale='chromatic', strength=1.0):
+        """
+        Simple vocals-only autotune: per-frame F0 estimation, snap to nearest note
+        in selected scale, pitch-shift each frame and overlap-add with strength mix.
+        """
+        print(f"[*] Applying autotune to vocals: key={key}, scale={scale}, strength={strength}")
+        vocals_path = Path(vocals_path)
+        if not vocals_path.exists():
+            print(f"    -> Source not found for autotune: {vocals_path}")
+            return None
+
+        y, sr = librosa.load(str(vocals_path), sr=sr, mono=True)
+        if len(y) == 0:
+            print("    -> Empty vocals file, skipping autotune.")
+            return None
+
+        frame_length = 2048
+        hop_length = 256
+
+        # Pitch estimation
+        try:
+            f0 = librosa.pyin(y, fmin=65, fmax=2000, sr=sr, frame_length=frame_length, hop_length=hop_length)
+        except Exception:
+            # fallback to yin if pyin unavailable
+            f0 = librosa.yin(y, fmin=65, fmax=2000, sr=sr, frame_length=frame_length, hop_length=hop_length)
+
+        # map key name to semitone (C=0 ... B=11)
+        note_map = {'C':0,'C#':1,'DB':1,'D':2,'D#':3,'EB':3,'E':4,'F':5,'F#':6,'GB':6,'G':7,'G#':8,'AB':8,'A':9,'A#':10,'BB':10,'B':11}
+        k = key.upper().replace('MINOR','').strip()
+        root_pc = note_map.get(k[:2] if k[:2] in note_map else k[:1], 0)
+
+        if scale == 'chromatic':
+            allowed_pc = list(range(12))
+        elif scale == 'major':
+            allowed_pc = [(root_pc + i) % 12 for i in [0,2,4,5,7,9,11]]
+        else: # minor
+            allowed_pc = [(root_pc + i) % 12 for i in [0,2,3,5,7,8,10]]
+
+        # Prepare output buffers
+        y_out = np.zeros_like(y)
+        weight = np.zeros_like(y)
+        window = np.hanning(frame_length)
+
+        n_frames = int(np.ceil((len(y) - frame_length) / hop_length)) + 1
+        for i in range(n_frames):
+            start = i * hop_length
+            end = start + frame_length
+            frame = y[start:end]
+            if len(frame) < frame_length:
+                pad = frame_length - len(frame)
+                frame = np.pad(frame, (0, pad), mode='constant')
+
+            if i < len(f0):
+                raw = f0[i]
+                # Some librosa versions may return array-like entries so we coerce to scalar
+                if isinstance(raw, np.ndarray) or (hasattr(raw, '__len__') and not isinstance(raw, (str, bytes))):
+                    try:
+                        f0_i = float(np.array(raw).flatten()[0])
+                    except Exception:
+                        f0_i = np.nan
+                else:
+                    try:
+                        f0_i = float(raw)
+                    except Exception:
+                        f0_i = np.nan
+            else:
+                f0_i = np.nan
+
+            if np.isnan(f0_i):
+                shifted = frame
+            else:
+                try:
+                    if not np.isfinite(f0_i) or f0_i <= 1e-6:
+                        shifted = frame
+                        # skip rest of processing for this frame
+                        y_out[start:end] += mixed * w
+                        weight[start:end] += w
+                        continue
+                    current_midi = librosa.hz_to_midi(f0_i)
+                    # if hz_to_midi returned non-finite, bail out
+                    if not np.isfinite(current_midi):
+                        shifted = frame
+                        y_out[start:end] += mixed * w
+                        weight[start:end] += w
+                        continue
+                    # search nearest target midi within +/-6 semitones whose pc is allowed
+                    center = int(round(current_midi))
+                except Exception:
+                    shifted = frame
+                    y_out[start:end] += mixed * w
+                    weight[start:end] += w
+                    continue
+                candidates = list(range(center-6, center+7))
+                best = min(candidates, key=lambda n: abs(n - current_midi) if (n % 12) in allowed_pc else 1e6)
+                if (best % 12) not in allowed_pc:
+                    # fallback to nearest semitone
+                    best = int(round(current_midi))
+                semitone_diff = best - current_midi
+                try:
+                    shifted = librosa.effects.pitch_shift(frame, sr, n_steps=semitone_diff)
+                    if len(shifted) < frame_length:
+                        shifted = np.pad(shifted, (0, frame_length - len(shifted)), mode='constant')
+                    elif len(shifted) > frame_length:
+                        shifted = shifted[:frame_length]
+                except Exception:
+                    shifted = frame
+
+            mixed = (1.0 - strength) * frame + strength * shifted
+            w = window
+            y_out[start:end] += mixed * w
+            weight[start:end] += w
+
+        # normalize
+        nonzero = weight > 1e-8
+        y_final = np.copy(y)
+        y_final[nonzero] = y_out[nonzero] / weight[nonzero]
+
+        out_path = self.demucs_out_dir / "vocals_autotuned.wav"
+        self.save_wav_safe(out_path, y_final, sr)
+        return out_path
+    
     def mix_final_track(self, clean_drums_path, clean_bass_path, vocals_path=None):
         print("[*] Mixing final track...")
         try:
@@ -330,11 +451,44 @@ if __name__ == "__main__":
         help="VoiceFixer mode: 0 (Default), 1 (Adds pre-processing and high-freq. cut), 2 (train mode)"
     )
 
+    # 4. Autotune options (vocals-only, independent)
+    parser.add_argument(
+        "--autotune-vocals",
+        action="store_true",
+        help="Apply simple autotune (pitch-correction) to vocals stem only"
+    )
+
+    parser.add_argument(
+        "--autotune-key",
+        type=str,
+        default="C",
+        help="Root key for autotune (e.g. C, D#, F)"
+    )
+
+    parser.add_argument(
+        "--autotune-scale",
+        type=str,
+        choices=["chromatic", "major", "minor"],
+        default="chromatic",
+        help="Scale used by autotune to snap pitches"
+    )
+
+    parser.add_argument(
+        "--autotune-strength",
+        type=float,
+        default=1.0,
+        help="Autotune strength (0.0 = no effect, 1.0 = full correction)"
+    )
+
     args = parser.parse_args()
 
     INPUT_FILE = args.input_file
     NO_VOCALS = args.no_vocals
-    VF_MODE = int(args.vf_mode)  # VoiceFixer mode (0 = strongest cleaning)
+    VF_MODE = int(args.vf_mode)
+    AUTOTUNE_VOCALS = bool(args.autotune_vocals)
+    AUTOTUNE_KEY = args.autotune_key
+    AUTOTUNE_SCALE = args.autotune_scale
+    AUTOTUNE_STRENGTH = max(0.0, min(1.0, float(args.autotune_strength)))
 
     cleaner = PhonkCleaner(INPUT_FILE)
     cleaner.separate_stems()
@@ -342,5 +496,28 @@ if __name__ == "__main__":
     clean_drums = cleaner.process_drums()
     clean_bass = cleaner.process_bass()
     restored_vocals = cleaner.process_vocals()
+    autotuned_vocals = None
+    if AUTOTUNE_VOCALS:
+        # choose source for autotune: prefer processed vocals, fall back to raw stem
+        if restored_vocals and Path(restored_vocals).exists():
+            source_for_autotune = restored_vocals
+        else:
+            possible = cleaner.demucs_out_dir / "vocals.mp3"
+            if not possible.exists():
+                possible = possible.with_suffix('.wav')
+            source_for_autotune = possible if possible.exists() else None
+
+        if source_for_autotune is None:
+            print("[!] Autotune requested but no vocals stem available.")
+        else:
+            autotuned_vocals = cleaner.apply_autotune_to_vocals(
+                source_for_autotune,
+                sr=44100,
+                key=AUTOTUNE_KEY,
+                scale=AUTOTUNE_SCALE,
+                strength=AUTOTUNE_STRENGTH
+            )
+
+    final_vocals = autotuned_vocals if autotuned_vocals else restored_vocals
     
-    cleaner.mix_final_track(clean_drums, clean_bass, restored_vocals)
+    cleaner.mix_final_track(clean_drums, clean_bass, final_vocals)
