@@ -265,6 +265,18 @@ class PhonkCleaner:
         frame_length = 2048
         hop_length = 256
 
+        # If key is auto, try to detect key & scale from vocals
+        if isinstance(key, str) and key.lower() in ("auto", "guess"):
+            try:
+                det_key, det_scale = self.detect_key_scale(y, sr)
+                print(f"    -> Detected key: {det_key} {det_scale}")
+                key = det_key
+                if scale == 'chromatic':
+                    # prefer detected scale when user left scale as chromatic
+                    scale = det_scale
+            except Exception as e:
+                print(f"    -> Key detection failed: {e}")
+
         # Pitch estimation
         try:
             f0 = librosa.pyin(y, fmin=65, fmax=2000, sr=sr, frame_length=frame_length, hop_length=hop_length)
@@ -292,15 +304,20 @@ class PhonkCleaner:
         n_frames = int(np.ceil((len(y) - frame_length) / hop_length)) + 1
         for i in range(n_frames):
             start = i * hop_length
-            end = start + frame_length
-            frame = y[start:end]
-            if len(frame) < frame_length:
-                pad = frame_length - len(frame)
-                frame = np.pad(frame, (0, pad), mode='constant')
+            if start >= len(y):
+                break
+            L = min(frame_length, len(y) - start)
+            frame = y[start:start+L]
 
+            # padded version for pitch-shifting operations
+            if L < frame_length:
+                frame_p = np.pad(frame, (0, frame_length - L), mode='constant')
+            else:
+                frame_p = frame
+
+            # estimate f0 for this frame index
             if i < len(f0):
                 raw = f0[i]
-                # Some librosa versions may return array-like entries so we coerce to scalar
                 if isinstance(raw, np.ndarray) or (hasattr(raw, '__len__') and not isinstance(raw, (str, bytes))):
                     try:
                         f0_i = float(np.array(raw).flatten()[0])
@@ -314,49 +331,33 @@ class PhonkCleaner:
             else:
                 f0_i = np.nan
 
-            if np.isnan(f0_i):
-                shifted = frame
-            else:
+            # default shifted is the original padded frame
+            shifted_p = frame_p
+            if np.isfinite(f0_i) and f0_i > 1e-6:
                 try:
-                    if not np.isfinite(f0_i) or f0_i <= 1e-6:
-                        shifted = frame
-                        # skip rest of processing for this frame
-                        y_out[start:end] += mixed * w
-                        weight[start:end] += w
-                        continue
                     current_midi = librosa.hz_to_midi(f0_i)
-                    # if hz_to_midi returned non-finite, bail out
-                    if not np.isfinite(current_midi):
-                        shifted = frame
-                        y_out[start:end] += mixed * w
-                        weight[start:end] += w
-                        continue
-                    # search nearest target midi within +/-6 semitones whose pc is allowed
-                    center = int(round(current_midi))
+                    if np.isfinite(current_midi):
+                        center = int(round(current_midi))
+                        candidates = list(range(center-6, center+7))
+                        best = min(candidates, key=lambda n: abs(n - current_midi) if (n % 12) in allowed_pc else 1e6)
+                        if (best % 12) not in allowed_pc:
+                            best = int(round(current_midi))
+                        semitone_diff = best - current_midi
+                        try:
+                            shifted_p = librosa.effects.pitch_shift(frame_p, sr, n_steps=semitone_diff)
+                            if len(shifted_p) < frame_length:
+                                shifted_p = np.pad(shifted_p, (0, frame_length - len(shifted_p)), mode='constant')
+                            elif len(shifted_p) > frame_length:
+                                shifted_p = shifted_p[:frame_length]
+                        except Exception:
+                            shifted_p = frame_p
                 except Exception:
-                    shifted = frame
-                    y_out[start:end] += mixed * w
-                    weight[start:end] += w
-                    continue
-                candidates = list(range(center-6, center+7))
-                best = min(candidates, key=lambda n: abs(n - current_midi) if (n % 12) in allowed_pc else 1e6)
-                if (best % 12) not in allowed_pc:
-                    # fallback to nearest semitone
-                    best = int(round(current_midi))
-                semitone_diff = best - current_midi
-                try:
-                    shifted = librosa.effects.pitch_shift(frame, sr, n_steps=semitone_diff)
-                    if len(shifted) < frame_length:
-                        shifted = np.pad(shifted, (0, frame_length - len(shifted)), mode='constant')
-                    elif len(shifted) > frame_length:
-                        shifted = shifted[:frame_length]
-                except Exception:
-                    shifted = frame
+                    shifted_p = frame_p
 
-            mixed = (1.0 - strength) * frame + strength * shifted
-            w = window
-            y_out[start:end] += mixed * w
-            weight[start:end] += w
+            mixed_p = (1.0 - strength) * frame_p + strength * shifted_p
+            w = window[:L]
+            y_out[start:start+L] += mixed_p[:L] * w
+            weight[start:start+L] += w
 
         # normalize
         nonzero = weight > 1e-8
@@ -366,6 +367,51 @@ class PhonkCleaner:
         out_path = self.demucs_out_dir / "vocals_autotuned.wav"
         self.save_wav_safe(out_path, y_final, sr)
         return out_path
+
+    def detect_key_scale(self, y, sr=44100):
+        """Estimate key and scale (major/minor) from audio using chroma and Krumhansl templates.
+
+        Returns (key_name, scale_name) where key_name is e.g. 'C'..'B' and scale_name is 'major' or 'minor'.
+        """
+        # Templates from Krumhansl (typical weights) for major and minor keys
+        major_template = np.array([6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88])
+        minor_template = np.array([6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17])
+
+        # compute chroma
+        try:
+            chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+        except Exception:
+            chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+
+        chroma_mean = np.mean(chroma, axis=1)
+        if np.all(chroma_mean == 0):
+            raise RuntimeError("Empty chroma, cannot detect key")
+
+        chroma_norm = chroma_mean / np.linalg.norm(chroma_mean)
+
+        best_key = None
+        best_score = -np.inf
+        best_scale = 'major'
+        note_names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+
+        # test rotations
+        for root in range(12):
+            maj = np.roll(major_template, -root)
+            min_t = np.roll(minor_template, -root)
+            maj_norm = maj / np.linalg.norm(maj)
+            min_norm = min_t / np.linalg.norm(min_t)
+            score_maj = np.dot(chroma_norm, maj_norm)
+            score_min = np.dot(chroma_norm, min_norm)
+            if score_maj > best_score:
+                best_score = score_maj
+                best_key = note_names[root]
+                best_scale = 'major'
+            if score_min > best_score:
+                best_score = score_min
+                best_key = note_names[root]
+                best_scale = 'minor'
+
+        return best_key, best_scale
     
     def mix_final_track(self, clean_drums_path, clean_bass_path, vocals_path=None):
         print("[*] Mixing final track...")
@@ -461,7 +507,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--autotune-key",
         type=str,
-        default="C",
+        default="auto",
         help="Root key for autotune (e.g. C, D#, F)"
     )
 

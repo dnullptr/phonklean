@@ -28,5 +28,34 @@ Notes
 - Best-effort approach: aims to recover musical detail without removing the genre's character.
 - Inspired by and built on ideas from `censorMyPy`.
 
+Smart Autotune (on vocals)
+- **What:** Optional, vocals-only pitch-correction that runs independently of the other vocal restoration steps.
+- **Example:**
+```bash
+python phonklean.py my_song.mp3 --autotune-vocals --autotune-key auto --autotune-strength 0.8
+```
+
+Usage & CLI options
+- `input_file` : positional path to the input audio file (WAV/MP3). If omitted, defaults to `Song_name.mp3`.
+- `--no-vocals`, `-nv` : skip all vocal-processing steps (useful when you only want instrument restoration).
+- `--vf-mode`, `-vfm [0|1|2]` : selects `VoiceFixer` restoration mode when available (0 default, 1 additional pre-processing, 2 train mode).
+- `--autotune-vocals` : enable vocals-only pitch correction (writes `vocals_autotuned.wav`).
+- `--autotune-key [KEY|auto]` : root key for autotune; use `auto` to detect key from the vocals stem.
+- `--autotune-scale [chromatic|major|minor]` : scale used for snapping pitches. If `chromatic`, detected scale may be used when key=`auto`.
+- `--autotune-strength [0.0-1.0]` : control how strongly notes are corrected (0 = passthrough, 1 = full correction).
+
+Examples
+
+```bash
+# Basic restore (auto separation + restore)
+python phonklean.py my_song.mp3
+
+# Run only instrument restoration, skip vocals
+python phonklean.py my_song.mp3 --no-vocals
+
+# Enable smart autotune on detected key with moderate strength
+python phonklean.py my_song.mp3 --autotune-vocals --autotune-key auto --autotune-strength 0.6
+```
+
 License
 - MIT — use and adapt freely; attribution appreciated.
