@@ -192,6 +192,38 @@ class PhonkCleaner:
         self.save_wav_safe(output_path, y, sr)
         return output_path
 
+    def attenuate_drum_bleed(self, y, sr, margin_db=2.0, perc_reduce=0.3):
+        """
+        HPSS-based drum bleed removal: separate harmonic (vocal sustain) from 
+        percussive (drum transients) and blend to remove over-gated drum artifacts.
+        
+        Args:
+            y: audio signal
+            sr: sample rate
+            margin_db: HPSS margin (higher = more separation)
+            perc_reduce: percussive blend (0.0 = remove all, 0.3 = keep 30%)
+        
+        Returns:
+            cleaned audio signal
+        """
+        try:
+            D = librosa.stft(y)
+            H, P = librosa.decompose.hpss(D, margin=margin_db)
+            
+            if perc_reduce == 0.0:
+                # Pure harmonic (most aggressive)
+                D_clean = H
+            else:
+                # Blend harmonic + reduced percussive
+                D_clean = H + P * perc_reduce
+            
+            y_clean = librosa.istft(D_clean)
+            print(f"       ✓ HPSS bleed removal (margin={margin_db}dB, perc_blend={perc_reduce})")
+            return y_clean
+        except Exception as e:
+            print(f"       [!] HPSS failed: {e}, skipping bleed removal.")
+            return y
+
     def process_vocals(self):
         print("[*] Restoring Vocals (Parallel Strategy)...")
         vocals_path = self.demucs_out_dir / "vocals.mp3"
@@ -242,6 +274,13 @@ class PhonkCleaner:
             # Fallback ללא AI
             print("    -> ","VoiceFixer not available or disabled." if not NO_VOCALS else "Vocals processing disabled by user.", "Using EQ fallback.")
             y_final = y_original
+
+        # --- Apply transient-aware spectral attenuation to remove drum bleed (optional) ---
+        if BLEED_REMOVAL:
+            print(f"    -> Attenuating drum bleed with HPSS (margin={BLEED_MARGIN}dB, blend={BLEED_BLEND})...")
+            y_final = self.attenuate_drum_bleed(y_final, sr, margin_db=BLEED_MARGIN, perc_reduce=BLEED_BLEND)
+        else:
+            print("    -> Drum bleed removal disabled (use --bleed-removal to enable)")
 
         self.save_wav_safe(out_path, y_final, sr)
         return out_path
@@ -526,12 +565,36 @@ if __name__ == "__main__":
         help="Autotune strength (0.0 = no effect, 1.0 = full correction)"
     )
 
+    # 5. Drum bleed removal (HPSS-based)
+    parser.add_argument(
+        "--bleed-removal",
+        action="store_true",
+        help="Remove over-gated drum bleed from vocals using HPSS (harmonic-percussive separation)"
+    )
+
+    parser.add_argument(
+        "--bleed-margin",
+        type=float,
+        default=2.0,
+        help="HPSS margin in dB (higher = more separation, default=2.0)"
+    )
+
+    parser.add_argument(
+        "--bleed-blend",
+        type=float,
+        default=0.3,
+        help="Percussive blend ratio (0.0 = remove all, 0.5 = 50%%, default=0.3)"
+    )
+
     args = parser.parse_args()
 
     INPUT_FILE = args.input_file
     NO_VOCALS = args.no_vocals
     VF_MODE = int(args.vf_mode)
     AUTOTUNE_VOCALS = bool(args.autotune_vocals)
+    BLEED_REMOVAL = bool(args.bleed_removal)
+    BLEED_MARGIN = float(args.bleed_margin)
+    BLEED_BLEND = float(args.bleed_blend)
     AUTOTUNE_KEY = args.autotune_key
     AUTOTUNE_SCALE = args.autotune_scale
     AUTOTUNE_STRENGTH = max(0.0, min(1.0, float(args.autotune_strength)))
