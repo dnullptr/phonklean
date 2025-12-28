@@ -490,7 +490,7 @@ class PhonkCleaner:
 
             # כיוון עוצמות סופי
             drums_gain_db = -1.5
-            bass_gain_db = 1.0
+            bass_gain_db = 2.0
 
             final_mix = (
                 vocals
@@ -499,8 +499,8 @@ class PhonkCleaner:
                .overlay(new_bass + bass_gain_db)
             )
 
-            out_file = self.output_dir / f"{self.track_name}_CLEANED_PHONK.mp3"
-            final_mix.export(str(out_file), format="mp3")
+            out_file = self.output_dir / f"{self.track_name}_CLEANED_PHONK.{'mp3' if OUTPUT_FORMAT=='mp3' else 'wav'}"
+            final_mix.export(str(out_file), format=OUTPUT_FORMAT, bitrate="320k" if OUTPUT_FORMAT=='mp3' else None)
             print(f"\n SUCCESS! Track saved at:\n{out_file.absolute()}")
 
         except Exception as e:
@@ -586,11 +586,21 @@ if __name__ == "__main__":
         help="Percussive blend ratio (0.0 = remove all, 0.5 = 50%%, default=0.3)"
     )
 
+    # Add argument for audio format (mp3/wav)
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        choices=["mp3", "wav"],
+        default="mp3",
+        help="Output audio format for the final mixed track (default=mp3)"
+    )
+
     args = parser.parse_args()
     global NO_VOCALS
     INPUT_FILE = args.input_file
     NO_VOCALS = args.no_vocals
     VF_MODE = int(args.vf_mode)
+    OUTPUT_FORMAT = args.output_format
     AUTOTUNE_VOCALS = bool(args.autotune_vocals)
     BLEED_REMOVAL = bool(args.bleed_removal)
     BLEED_MARGIN = float(args.bleed_margin)

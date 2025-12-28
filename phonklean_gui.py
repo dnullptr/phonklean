@@ -11,7 +11,7 @@ class PhonkCleanerGUI:
         self.cleaner = None
         self.current_file = None
         
-    def process_audio(self, input_file, no_vocals, vf_mode, autotune_vocals, 
+    def process_audio(self, input_file, output_format, no_vocals, vf_mode, autotune_vocals, 
                      autotune_key, autotune_scale, autotune_strength,
                      bleed_removal, bleed_margin, bleed_blend):
         """
@@ -39,6 +39,7 @@ class PhonkCleanerGUI:
             import phonklean as pk
             pk.NO_VOCALS = no_vocals
             pk.VF_MODE = int(vf_mode)
+            pk.OUTPUT_FORMAT = output_format
             pk.AUTOTUNE_VOCALS = autotune_vocals
             pk.BLEED_REMOVAL = bleed_removal
             pk.BLEED_MARGIN = float(bleed_margin)
@@ -141,12 +142,20 @@ class PhonkCleanerGUI:
                     gr.Markdown("### 📁 Input")
                     input_file = gr.File(
                         label="Upload Audio File",
-                        file_types=["audio"],
+                        file_types=[".mp3", ".wav", ".m4a", ".flac"],
                         type="filepath"
                     )
+                    output_format = gr.Radio(
+                        choices=["mp3", "wav"], 
+                        value="mp3",
+                        label="Output Audio Format",
+                        info="Choose the format for the output audio file"
+                    )
+                    
                 
                 with gr.Column(scale=1):
                     gr.Markdown("### ⚙️ Core Options")
+                    
                     no_vocals = gr.Checkbox(
                         label="Skip Vocal Processing",
                         value=False,
@@ -265,7 +274,7 @@ class PhonkCleanerGUI:
             process_btn.click(
                 fn=self.process_audio,
                 inputs=[
-                    input_file, no_vocals, vf_mode, autotune_vocals,
+                    input_file, output_format, no_vocals, vf_mode, autotune_vocals,
                     autotune_key, autotune_scale, autotune_strength,
                     bleed_removal, bleed_margin, bleed_blend
                 ],
@@ -276,6 +285,17 @@ class PhonkCleanerGUI:
 
 
 if __name__ == "__main__":
+
+    # get local network ip
+    def _get_lan_ip():
+        out = os.popen('ipconfig').read().split('\n')
+        for line in out:
+            if 'IPv4 Address' in line:
+                ip = line.split(':')[-1].strip()
+                return ip
+
+    lan_ip = _get_lan_ip()
+    print(f"Local network IP address: {lan_ip}")
     gui = PhonkCleanerGUI()
     demo = gui.create_interface()
-    demo.launch(share=False, server_name="127.0.0.1", server_port=7860)
+    demo.launch(share=False, server_name=lan_ip, server_port=7860)
